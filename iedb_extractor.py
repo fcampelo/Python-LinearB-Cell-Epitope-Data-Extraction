@@ -5,100 +5,96 @@ import pandas as pd
 import numpy as np
 import xml.etree.ElementTree as et
 import glob
-import os
 
+# the namespace of the xml
 path = "{http://www.iedb.org/schema/CurationSchema}"
-xml_path = 'example_XML/*.xml'
-file_path = 'output.csv'
 
-def main():
+def iedb_extract(xml_path):
 
     # array of all processed epitopes
     processed_array = []
 
     # iterates through all xml files in xml_path directory
     for xml in glob.iglob(xml_path):
+        print("Reading " + str(xml) + " XML File")
         try:
-            root = et.parse(xml).getroot()
-            print(xml)
-            if (check_linear_bcell_epitopes(root) == True):
-                # path to each epitope
-                epitope_path = path +"Reference/"+ path +"Epitopes/"+ path +"Epitope"
+            # parse the xml bit by bit using the iterparse
+            for event, elem in et.iterparse(xml):
+                # if the xml tag encountered is Article process article data
+                if elem.tag == et.QName("http://www.iedb.org/schema/CurationSchema", 'Article'):
+                    article_dict = get_article_information(elem)
 
-                # final output of each bit of data
-                final_array = None
+                # if the xml tag encountered is Epitope process epitope data
+                if elem.tag == et.QName("http://www.iedb.org/schema/CurationSchema", 'Epitope'):
+                    if (check_linear_bcell_epitopes(elem) == True):
+                        epitope_dict = process_epitope(elem)
 
-                # get the article information first
-                article_array = get_article_information(root)
+                        if(elem.find(path + "EpitopeName") != None):
+                            print("Processing Epitope " + elem.find(path + "EpitopeName").text + " (" + str(xml) + ")")
 
-                # go through all the epitopes in the xml file
-                for epitope in root.findall(epitope_path):
-                    epitope_array = process_epitope(epitope)
+                        if (check_assay(elem) == True):
+                            assay_dict = process_assays(elem)
 
-                    if(epitope.find(path + "EpitopeName") != None):
-                        print(epitope.find(path + "EpitopeName").text)
+                            # combines all dictonaries of data into one
+                            final_dict = {**article_dict, **epitope_dict, **assay_dict}
 
-                    if (check_assay(epitope) == True):
-                        assay_array = process_assays(epitope)
+                        # when there's no assay
+                        else:
+                            empty_dict = {'host_id': "NA",'bcell_id': "NA",'assay_class': "NA",'majority_class': "NA",'assay_type': "NA"}
+                            final_dict = {**article_dict, **epitope_dict, **empty_dict}
 
-                        # combines the epitope and assay data into one array
-                        final_array = np.append(article_array, epitope_array)
-                        final_array = np.append(final_array, assay_array)
+                        if (check_add_to_dataframe(final_dict) == True):
+                            processed_array.append(final_dict)
+
+                        # clear the current iterator focus after it's processed
+                        elem.clear()
+
                     else:
-                        empty_array = np.array(["NA","NA","NA","NA"])
-                        final_array = np.append(article_array, epitope_array)
-                        final_array = np.append(final_array, empty_array)
-
-                    # 15 parameters need to get passed to the DataFrame
-                    df = pd.DataFrame([final_array],columns=["pubmed_id","year","epit_name","epitope_id","evid_code","epit_struc_def","sourceOrg_id","protein_id","epit_seq","start_pos","end_pos","host_id","bcell_id","class","assay_type"])
-
-                    processed_array.append(final_array)
+                        elem.clear()
 
         except et.ParseError:
             print("Parse error in "+ xml +",invalid xml format")
 
+    # turn the final data extracted into a dataframe
     if (len(processed_array) != 0):
-        output_array = np.vstack(processed_array)
+        print("Processed " + str(len(processed_array)) + " epitopes from IEDB")
+        df = pd.DataFrame(processed_array)
+        df.to_csv('output/iedb_extractor_output.csv',index=False)
+        return df
 
-        df = pd.DataFrame.from_records(output_array,columns=["pubmed_id","year","epit_name","epitope_id","evid_code","epit_struc_def","sourceOrg_id","protein_id","epit_seq","start_pos","end_pos","host_id","bcell_id","class","assay_type"])
-        df.to_csv('output.csv',index=False)
+# checks if an eptiope contains is a linear bcell
+def check_linear_bcell_epitopes(elem):
 
-# finds out if a Linear B-Cell epitopes is present to process file
-def check_linear_bcell_epitopes(root):
-
-    bcell_path = path +"Reference/"+ path +"Epitopes/"+ path +"Epitope/"+ path + "Assays/"+ path +"BCell"
-    linear_path = path +"Reference/"+ path +"Epitopes/"+ path +"Epitope/"+ path +"EpitopeStructure/"+ path +"FragmentOfANaturalSequenceMolecule"
-
-    bcell_array = []
-    linear_array = []
-
-    # checks if xml contains bcell tag and linear
-    for bcell in root.findall(bcell_path):
-        bcell_array.append(bcell)
-
-    for linear in root.findall(linear_path):
-        linear_array.append(linear)
+    bcell_path = path + "Assays/" + path + "BCell"
+    linear_path = path + "EpitopeStructure/" + path + "FragmentOfANaturalSequenceMolecule/" + path + "LinearSequence"
 
     # if it has the tags return true otherwise false
-    if (len(linear_array) != 0 and len(bcell_array) != 0):
+    if (elem.find(bcell_path) != None and elem.find(linear_path) != None):
         return True
     else:
         return False
 
 # gets the article part of the xml file
-def get_article_information(root):
-        # part of the article section
-        pubmed_id_path = path +"Reference/"+ path +"Article/"+ path +"PubmedId"
-        year_path = path +"Reference/"+ path +"Article/"+ path +"ArticleYear"
+def get_article_information(article):
+    # dictonary to return values with key as name of field they represent
+    dict = {}
 
-        pubmed_id = process_epitope_data(root, pubmed_id_path)
-        year = process_epitope_data(root, year_path)
+    # part of the article section
+    pubmed_id_path = path +"PubmedId"
+    year_path = path +"ArticleYear"
 
-        article_array = np.array([pubmed_id, year])
+    # adds the values for pubmed_id and year with the respective names as
+    # keys
+    dict['pubmed_id'] = process_epitope_data(article, pubmed_id_path)
+    dict['year'] = process_epitope_data(article, year_path)
 
-        return article_array
+    return dict
 
 def process_epitope(epitope):
+
+    # dictonary to return values with key as name of field they represent
+    dict = {}
+
     # the paths to all the parameters that need processing
     # part of the the epitope section
     epit_name_path = path +"EpitopeName"
@@ -111,37 +107,36 @@ def process_epitope(epitope):
     start_pos_path = path +"EpitopeStructure/"+ path +"FragmentOfANaturalSequenceMolecule/"+ path +"StartingPosition"
     end_pos_path = path +"EpitopeStructure/"+ path +"FragmentOfANaturalSequenceMolecule/"+ path +"EndingPosition"
 
-    # processes the parameter that are required
-    epit_name = process_epitope_data(epitope, epit_name_path)
-    epitope_id = process_epitope_data(epitope, epitope_id_path)
-    evid_code = process_epitope_data(epitope, evid_code_path)
-    epit_struc_def = process_epitope_data(epitope, epit_struc_def_path)
-    sourceorg_id = process_epitope_data(epitope, sourceorg_id_path)
-    protein_id = process_epitope_data(epitope, protein_id_path)
-    epit_seq = process_epitope_data(epitope, epit_seq_path)
+    # processes the parameter that are required and add them to dict
+    dict['epit_name'] = process_epitope_data(epitope, epit_name_path)
+    dict['epitope_id'] = process_epitope_data(epitope, epitope_id_path)
+    dict['evid_code'] = process_epitope_data(epitope, evid_code_path)
+    dict['epit_struc_def'] = process_epitope_data(epitope, epit_struc_def_path)
+    dict['sourceOrg_id'] = process_epitope_data(epitope, sourceorg_id_path)
+    dict['protein_id'] = process_epitope_data(epitope, protein_id_path)
+    dict['epit_seq'] = process_epitope_data(epitope, epit_seq_path)
 
     # If the starting or end positions tags are empty we check another location
     if(epitope.find(start_pos_path) != None):
-        start_pos = epitope.find(start_pos_path).text
+        dict['start_pos'] = epitope.find(start_pos_path).text
     else:
         start_pos_path = path +"ReferenceStartingPosition"
+
         if(epitope.find(start_pos_path) != None):
-            start_pos = epitope.find(start_pos_path).text
+            dict['start_pos'] = epitope.find(start_pos_path).text
         else:
-            start_pos = "NA"
+            dict['start_pos'] = "NA"
 
     if(epitope.find(end_pos_path) != None):
-        end_pos = epitope.find(end_pos_path).text
+        dict['end_pos'] = epitope.find(end_pos_path).text
     else:
         end_pos_path = path +"ReferenceEndingPosition"
         if(epitope.find(end_pos_path) != None):
-            end_pos = epitope.find(end_pos_path).text
+            dict['end_pos'] = epitope.find(end_pos_path).text
         else:
-            end_pos = "NA"
+            dict['end_pos'] = "NA"
 
-    epitope_array = np.array([epit_name, epitope_id, evid_code, epit_struc_def, sourceorg_id, protein_id, epit_seq, start_pos, end_pos])
-
-    return epitope_array
+    return dict
 
 # check if there is an array present in the epitope
 def check_assay(epitope):
@@ -167,16 +162,31 @@ def check_assay(epitope):
         else:
             return False
 
+# checks if any of the required parameters are equal to "NA"
+def check_add_to_dataframe(dict):
+    if(dict.get('protein_id') == "NA"):
+        return False
+    elif(dict.get('epit_seq') == "NA"):
+        return False
+    elif(dict.get('assay_type') == "NA"):
+        return False
+    else:
+        return True
+
 # get the data from each parameter
-def process_epitope_data(root, path):
-    if(root.find(path) != None):
-        processed = root.find(path).text
+def process_epitope_data(elem, path):
+    if(elem.find(path) != None):
+        processed = elem.find(path).text
     else:
         processed = "NA"
     return processed
 
 # process the data from each assay section of the epitope
 def process_assays(epitope):
+
+    # dictonary to return values with key as name of field they represent
+    dict = {}
+
     # paths for the assay parameters that need processing
     host_id_path = path +"Assays/"+ path +"BCell/"+ path +"Immunization/"+ path +"HostOrganism/"+ path +"OrganismId"
     bcell_id_path = path +"Assays/"+ path +"BCell/"+ path +"BCellId"
@@ -187,31 +197,89 @@ def process_assays(epitope):
     # then appends it to a string so it's outputted correctly
     loop_list = []
 
+    # finds all the host ids of an epitope and appends them to a string
+    # according
     for host_id in epitope.findall(host_id_path):
-        loop_list.append('"'+ host_id.text +'"')
-        host_ids = ','.join(loop_list)
+        if (len(epitope.findall(host_id_path)) == 1):
+            loop_list.append('"'+ host_id.text + '"')
+        elif (len(loop_list) == 0):
+            loop_list.append('"'+ host_id.text)
+        elif (len(loop_list) == len(epitope.findall(host_id_path))-1):
+            loop_list.append(host_id.text + '"')
+        else:
+            loop_list.append(host_id.text)
+        dict['host_id'] = ','.join(loop_list)
 
     loop_list.clear()
 
+    # finds all the bcell ids of an epitope and appends them to a string
+    # according
     for bcell_id in epitope.findall(bcell_id_path):
-        loop_list.append('"'+ bcell_id.text +'"')
-        bcell_ids = ','.join(loop_list)
+        if (len(epitope.findall(bcell_id_path)) == 1):
+            loop_list.append('"'+ bcell_id.text + '"')
+        elif (len(loop_list) == 0):
+            loop_list.append('"'+ bcell_id.text)
+        elif (len(loop_list) == len(epitope.findall(bcell_id_path))-1):
+            loop_list.append(bcell_id.text + '"')
+        else:
+            loop_list.append(bcell_id.text)
+        dict['bcell_id'] = ','.join(loop_list)
 
     loop_list.clear()
 
+    class_array = []
+
+    # finds all the assay class of an epitope and appends them to a string
+    # according
     for assay_class in epitope.findall(class_path):
-        loop_list.append('"'+ assay_class.text +'"')
-        classes = ','.join(loop_list)
+
+        if(assay_class.text == "Positive"):
+            class_value = "1"
+        else:
+            class_value = "-1"
+
+        class_array.append(class_value)
+
+        if (len(epitope.findall(class_path)) == 1):
+            loop_list.append('"'+ class_value +'"')
+        elif (len(loop_list) == 0):
+            loop_list.append('"'+ class_value)
+        elif (len(loop_list) == len(epitope.findall(class_path))-1):
+            loop_list.append(class_value + '"')
+        else:
+            loop_list.append(class_value)
+        dict['assay_class'] = ','.join(loop_list)
+
+    dict['majority_class'] = get_majority_class(class_array)
 
     loop_list.clear()
 
+    # finds all the assay types of an epitope and appends them to a string
+    # according
     for assay_type in epitope.findall(assay_type_path):
-        loop_list.append('"'+ assay_type.text +'"')
-        assay_types = ','.join(loop_list)
+        if (len(epitope.findall(assay_type_path)) == 1):
+            loop_list.append('"'+ assay_type.text +'"')
+        elif (len(loop_list) == 0):
+            loop_list.append('"' + assay_type.text)
+        elif (len(loop_list) == len(epitope.findall(assay_type_path))-1):
+            loop_list.append(assay_type.text + '"')
+        else:
+            loop_list.append(assay_type.text)
+        dict['assay_type'] = ','.join(loop_list)
 
-    assay_array = np.array([host_ids, bcell_ids, classes, assay_types])
+    return dict
 
-    return assay_array
+# get an epitope assays classes as as an array and determines is it has
+# more positives or negative or equal
+def get_majority_class(array):
+    positive_count = array.count("1")
+    negative_count = array.count("-1")
 
-if __name__ == "__main__":
-    main()
+    if (positive_count > negative_count):
+        majority_class = "1"
+    elif(negative_count > positive_count):
+        majority_class = "-1"
+    else:
+        majority_class = "No dominant class"
+
+    return majority_class
